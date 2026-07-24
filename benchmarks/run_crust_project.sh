@@ -108,12 +108,12 @@ ROW[ab_cpp]="na"; ROW[ab_rust]="na"; ROW[pass1]="na"
 ROW[ab_note]=""; ROW[pass1_note]=""
 ROW[c_raw_ptr_deref]=0; ROW[c_static_mut]=0; ROW[c_union_member]=0; ROW[c_unchecked_arith]=0
 ROW[c_sites]=0; ROW[c_total_exprs]=0
-ROW[r_raw_ptr_deref]=0; ROW[r_extern_unsafe_call]=0; ROW[r_first_party_call]=0; ROW[r_intrinsic_call]=0; ROW[r_static_mut]=0; ROW[r_union_read]=0
+ROW[r_raw_ptr_deref]=0; ROW[r_extern_unsafe_call]=0; ROW[r_first_party_call]=0; ROW[r_intrinsic_call]=0; ROW[r_boundary_reborrow]=0; ROW[r_static_mut]=0; ROW[r_union_read]=0
 ROW[r_transmute]=0; ROW[r_inline_asm]=0; ROW[r_unchecked_arith]=0; ROW[r_unsafe_blocks]=0
 ROW[r_sites]=0; ROW[rust_exprs]=0
 ROW[note]=""
 # --- two-mode faithful (non-safe) emission: NEW f_* site keys (contract §1/§3) ---
-ROW[f_raw_ptr_deref]=0; ROW[f_extern_unsafe_call]=0; ROW[f_static_mut]=0; ROW[f_union_read]=0
+ROW[f_raw_ptr_deref]=0; ROW[f_extern_unsafe_call]=0; ROW[f_boundary_reborrow]=0; ROW[f_static_mut]=0; ROW[f_union_read]=0
 ROW[f_transmute]=0; ROW[f_inline_asm]=0; ROW[f_sites]=0; ROW[f_total_exprs]=0
 # --- per-function metrics (contract §4) ---
 ROW[total_fns]=0; ROW[unsafe_fns_safe]=0; ROW[unsafe_fns_faithful]=0; ROW[fns_made_safe]=0
@@ -126,9 +126,9 @@ emit_row() {
   for k in project tus transpiled_cpp cpp_crates compiled_cpp transpiled_rust rust_crates \
            compiled_rust ab_cpp ab_rust pass1 ab_note pass1_note \
            c_raw_ptr_deref c_static_mut c_union_member c_unchecked_arith c_sites c_total_exprs \
-           r_raw_ptr_deref r_extern_unsafe_call r_first_party_call r_intrinsic_call r_static_mut r_union_read r_transmute \
+           r_raw_ptr_deref r_extern_unsafe_call r_first_party_call r_intrinsic_call r_boundary_reborrow r_static_mut r_union_read r_transmute \
            r_inline_asm r_unchecked_arith r_unsafe_blocks r_sites rust_exprs note \
-           f_raw_ptr_deref f_extern_unsafe_call f_static_mut f_union_read f_transmute f_inline_asm \
+           f_raw_ptr_deref f_extern_unsafe_call f_boundary_reborrow f_static_mut f_union_read f_transmute f_inline_asm \
            f_sites f_total_exprs \
            total_fns unsafe_fns_safe unsafe_fns_faithful fns_made_safe \
            safe_parse_errors faithful_parse_errors compiled_rust_faithful; do
@@ -304,6 +304,7 @@ ROW[r_raw_ptr_deref]="$(sum_key "$FUNNEL_R" raw_ptr_deref)"
 ROW[r_extern_unsafe_call]="$(sum_key "$FUNNEL_R" extern_unsafe_call)"
 ROW[r_first_party_call]="$(sum_key "$FUNNEL_R" first_party_call)"
 ROW[r_intrinsic_call]="$(sum_key "$FUNNEL_R" intrinsic_call)"
+ROW[r_boundary_reborrow]="$(sum_key "$FUNNEL_R" boundary_reborrow)"
 ROW[r_static_mut]="$(sum_key "$FUNNEL_R" static_mut)"
 ROW[r_union_read]="$(sum_key "$FUNNEL_R" union_read)"
 ROW[r_transmute]="$(sum_key "$FUNNEL_R" transmute)"
@@ -329,6 +330,7 @@ FUNNEL_F="${OUT}/funnel_rust_faithful.log"
 "$UNSAFE_CENSUS_BIN" "$FAITHFUL_OUT" >"$FUNNEL_F" 2>>"$LOG"
 ROW[f_raw_ptr_deref]="$(sum_key "$FUNNEL_F" raw_ptr_deref)"
 ROW[f_extern_unsafe_call]="$(sum_key "$FUNNEL_F" extern_unsafe_call)"
+ROW[f_boundary_reborrow]="$(sum_key "$FUNNEL_F" boundary_reborrow)"
 ROW[f_static_mut]="$(sum_key "$FUNNEL_F" static_mut)"
 ROW[f_union_read]="$(sum_key "$FUNNEL_F" union_read)"
 ROW[f_transmute]="$(sum_key "$FUNNEL_F" transmute)"

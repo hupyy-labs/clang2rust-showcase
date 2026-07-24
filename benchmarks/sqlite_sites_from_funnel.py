@@ -16,8 +16,9 @@ per-function columns as the corpus.
 
   Each census file (TWO_MODE_CONTRACT.md §2) is a stream of per-function lines:
     FUNNEL_ACCT: lane=rust region=<stem>::<fn> raw_ptr_deref=N extern_unsafe_call=N
-      first_party_call=N intrinsic_call=N static_mut=N union_read=N transmute=N
-      inline_asm=N unchecked_arith=N unsafe_blocks=N total_exprs=N
+      first_party_call=N intrinsic_call=N boundary_reborrow=N static_mut=N
+      union_read=N transmute=N inline_asm=N unchecked_arith=N unsafe_blocks=N
+      total_exprs=N
   then ONE trailing summary line `FUNNEL_ACCT: lane=rust parse_errors=N`.
 
 Emits one tab-separated key=value line to stdout:
@@ -41,8 +42,13 @@ import sys
 SITE_FAMILIES = ("raw_ptr_deref", "extern_unsafe_call", "static_mut",
                  "union_read", "transmute", "inline_asm")
 # Every per-region family key parsed off a census line (site families + the
-# reported-but-excluded lanes + the UOD denominator).
+# reported-but-excluded lanes + the UOD denominator). `boundary_reborrow`
+# (`&*p`/`&mut *p` reborrows at lifted-signature seams) is a REPORTED-BUT-
+# EXCLUDED lane — it is deliberately NOT in SITE_FAMILIES, so it never enters
+# r_sites/f_sites; folding it in was the cause of the misleading negative
+# "Site Reduction %" (a re-spelled pointer risk, not new unsafety).
 ALL_FAMILIES = SITE_FAMILIES + ("first_party_call", "intrinsic_call",
+                                "boundary_reborrow",
                                 "unchecked_arith", "unsafe_blocks", "total_exprs")
 
 _REGION_RX = re.compile(r"\bregion=(\S+)")
@@ -113,6 +119,7 @@ def main():
         "r_extern_unsafe_call": s_tot["extern_unsafe_call"],
         "r_first_party_call": s_tot["first_party_call"],
         "r_intrinsic_call": s_tot["intrinsic_call"],
+        "r_boundary_reborrow": s_tot["boundary_reborrow"],
         "r_static_mut": s_tot["static_mut"],
         "r_union_read": s_tot["union_read"],
         "r_transmute": s_tot["transmute"],
@@ -124,6 +131,7 @@ def main():
         # --- NON-SAFE (faithful) — f_* (contract §5) ------------------------
         "f_raw_ptr_deref": f_tot["raw_ptr_deref"],
         "f_extern_unsafe_call": f_tot["extern_unsafe_call"],
+        "f_boundary_reborrow": f_tot["boundary_reborrow"],
         "f_static_mut": f_tot["static_mut"],
         "f_union_read": f_tot["union_read"],
         "f_transmute": f_tot["transmute"],

@@ -125,7 +125,10 @@ LEGEND = (
     "unsafe-site total (`raw_ptr_deref + extern_unsafe_call + static_mut + "
     "union_read + transmute + inline_asm`) in each emission; `first_party_call` "
     "(harness-FFI / transpiler shims), `intrinsic_call` (benign compiler "
-    "intrinsics), `unchecked_arith` (C pointer arithmetic) and whole "
+    "intrinsics), `boundary_reborrow` (`&*p`/`&mut *p` reborrows synthesized "
+    "where a lifted callee signature meets a caller local that stayed a raw "
+    "pointer — the SAME pointer risk re-spelled at each call seam, not new "
+    "unsafety), `unchecked_arith` (C pointer arithmetic) and whole "
     "`unsafe_blocks` are separate lanes, never folded into the total. "
     "**Site Reduction (%)** — `(faithful − safe) ÷ faithful`; **positive = the "
     "uplift REMOVED unsafe sites** relative to the faithful baseline. "
@@ -142,10 +145,10 @@ LEGEND = (
     "Safety cells render `pending` / `n/a` for any project whose faithful OR "
     "safe emission had a non-zero parse-error count — those projects are "
     "excluded from the aggregate (the excluded count is reported there). "
-    "Whole-program **SQLite shows ≈0 reduction by design**: it is emitted as one "
-    "monocrate where almost every function is externally visible across the link "
-    "set, so the ownership/pointer uplifts are ABI-vetoed there to preserve the "
-    "C-ABI boundary — the site-removing signal concentrates in the smaller, "
+    "Whole-program **SQLite shows a small reduction by design**: it is emitted as "
+    "one monocrate where almost every function is externally visible across the "
+    "link set, so the ownership/pointer uplifts are ABI-vetoed there to preserve "
+    "the C-ABI boundary — the site-removing signal concentrates in the smaller, "
     "self-contained CRUST-bench projects. All counts use thousands "
     "separators.</sub>"
 )
@@ -327,6 +330,9 @@ def aggregate_block(all_rows, excluded=0):
                  f"_—_ | _{fmt_n(tot('r_first_party_call'))}_ | _—_ |")
     lines.append(f"| _intrinsic_call (benign compiler intrinsics — excluded)_ | "
                  f"_—_ | _{fmt_n(tot('r_intrinsic_call'))}_ | _—_ |")
+    lines.append(f"| _boundary_reborrow (`&*p`/`&mut *p` at lifted-signature seams — excluded)_ | "
+                 f"_{fmt_n(tot('f_boundary_reborrow'))}_ | _{fmt_n(tot('r_boundary_reborrow'))}_ | "
+                 f"_{fmt_n(tot('f_boundary_reborrow') - tot('r_boundary_reborrow'))}_ |")
     f_exprs = tot("f_total_exprs")
     r_exprs = tot("rust_exprs")
     f_uod = f"{100.0 * f_total / f_exprs:.2f}%" if f_exprs else "n/a"
@@ -493,12 +499,17 @@ def render_sqlite(status_path, sites_path):
             "[`benchmarks/sqlite_sites_from_funnel.py`](benchmarks/sqlite_sites_from_funnel.py) "
             "into [`benchmarks/sqlite-sites.tsv`](benchmarks/sqlite-sites.tsv). "
             f"A further **{fmt_n(gi(sr, 'r_first_party_call'))}** first-party (in-project) "
-            f"calls and **{fmt_n(gi(sr, 'r_intrinsic_call'))}** benign intrinsics are excluded "
-            "from the total. The faithful→safe delta is **≈0 by design**: SQLite is emitted as "
-            "ONE whole-program monocrate, so nearly every function is externally visible across "
-            "the link set and the ownership/pointer uplifts are ABI-vetoed there to preserve the "
-            "C-ABI boundary — the site-removing uplift signal concentrates in the smaller, "
-            "self-contained CRUST-bench projects, not here. The **UOD** columns (density, "
+            f"calls, **{fmt_n(gi(sr, 'r_intrinsic_call'))}** benign intrinsics, and "
+            f"**{fmt_n(gi(sr, 'r_boundary_reborrow'))}** `&*p`/`&mut *p` boundary reborrows "
+            f"(vs {fmt_n(gi(sr, 'f_boundary_reborrow'))} in the faithful baseline) are excluded "
+            "from the total. Those reborrows are the SAME pointer risk re-spelled at each "
+            "lifted-signature call seam (fan-out), not new unsafety — folding them in was what "
+            "made the earlier figure read negative. The faithful→safe delta is **small by design**: "
+            "SQLite is emitted as ONE whole-program monocrate, so nearly every function is "
+            "externally visible across the link set and the ownership/pointer uplifts are "
+            "ABI-vetoed there to preserve the C-ABI boundary — the site-removing uplift signal "
+            "concentrates in the smaller, self-contained CRUST-bench projects, not here. The "
+            "**UOD** columns (density, "
             f"{f_uod} → {r_uod}) are the cleaner cross-mode measure. State facts recorded "
             f"{status_row.get('run_date', '?')}.</sub>")
     return "\n".join(lines)
