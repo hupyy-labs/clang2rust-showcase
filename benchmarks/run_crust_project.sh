@@ -59,7 +59,18 @@ RBENCH_DIR="${DATASET_DIR}/RBench"
 RESULTS_DIR="${RESULTS_DIR:-${CACHE_DIR}/results}"
 
 TRANSPILER="${TRANSPILER:-${SCRIPT_DIR}/../../cpp-to-rust/cpp/build/bin/cpp2rust}"
-GEIGER_SCORE="${GEIGER_SCORE:-${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh}"
+# geiger_score.sh lives in the parent transpiler repo. Two supported layouts:
+# showcase as a SIBLING checkout (../../cpp-to-rust/...) and showcase as the
+# cpp-to-rust SUBMODULE (../../bench/...).
+_default_geiger() {
+  local c
+  for c in "${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh" \
+           "${SCRIPT_DIR}/../../bench/metrics/geiger_score.sh"; do
+    [ -f "$c" ] && { echo "$c"; return; }
+  done
+  echo "${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh"
+}
+GEIGER_SCORE="${GEIGER_SCORE:-$(_default_geiger)}"
 
 pick() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { echo "$c"; return; }; done; echo "$1"; }
 CXX="${CXX:-$(pick /opt/homebrew/opt/llvm/bin/clang++ clang++)}"

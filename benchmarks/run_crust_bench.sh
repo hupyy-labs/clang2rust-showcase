@@ -52,7 +52,17 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRANSPILER="${TRANSPILER:-${SCRIPT_DIR}/../../cpp-to-rust/cpp/build/bin/cpp2rust}"
-GEIGER_SCORE="${GEIGER_SCORE:-${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh}"
+# Two supported layouts: showcase as a SIBLING checkout of cpp-to-rust, and
+# showcase as the cpp-to-rust SUBMODULE.
+_default_geiger() {
+  local c
+  for c in "${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh" \
+           "${SCRIPT_DIR}/../../bench/metrics/geiger_score.sh"; do
+    [ -f "$c" ] && { echo "$c"; return; }
+  done
+  echo "${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh"
+}
+GEIGER_SCORE="${GEIGER_SCORE:-$(_default_geiger)}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clang2rust/crust-bench"
 JOBS=4
 ONLY=""
