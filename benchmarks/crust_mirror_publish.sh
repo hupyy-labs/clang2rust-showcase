@@ -213,6 +213,16 @@ else
     || warn "$PROJECT: submodule add reported an issue (may already be registered) — continuing."
 fi
 git -C "$SHOWCASE_ROOT" add .gitmodules "$SM_PATH" 2>/dev/null || true
-warn "$PROJECT: submodule $SM_PATH staged in showcase (not committed — run_all.sh bundles it)."
+# Registered-but-uninitialized submodule (fresh/partial checkout): `submodule
+# add` fails and `git add $SM_PATH` stages nothing — stage the gitlink pin
+# directly at the tip we just pushed, and VERIFY it landed in the index.
+REMOTE_TIP="$(git -C "$WORK" rev-parse HEAD 2>/dev/null || true)"
+[ -n "$REMOTE_TIP" ] || REMOTE_TIP="$(git ls-remote "$MIRROR_URL" main | cut -f1)"
+[ -n "$REMOTE_TIP" ] || die "$PROJECT: cannot resolve pushed mirror tip for gitlink staging."
+if ! git -C "$SHOWCASE_ROOT" ls-files --stage -- "$SM_PATH" | grep -q "^160000 ${REMOTE_TIP}"; then
+  git -C "$SHOWCASE_ROOT" update-index --add --cacheinfo "160000,${REMOTE_TIP},${SM_PATH}" \
+    || die "$PROJECT: could not stage gitlink $SM_PATH @ ${REMOTE_TIP}."
+fi
+warn "$PROJECT: submodule $SM_PATH staged in showcase @ ${REMOTE_TIP} (not committed — run_all.sh bundles it)."
 echo "[crust-mirror] $PROJECT: done (repo=$REPO_NAME submodule=$SM_PATH)."
 exit 0
