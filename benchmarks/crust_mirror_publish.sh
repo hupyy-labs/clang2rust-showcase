@@ -197,7 +197,7 @@ rc=$?
 # 5) Wire the mirror as a SUBMODULE of the showcase repo (stage pointer only;
 #    the showcase commit is bundled by run_all.sh, contract §9.7).
 # ---------------------------------------------------------------------------
-[ -d "$SHOWCASE_ROOT/.git" ] || die "$PROJECT: showcase root ($SHOWCASE_ROOT) is not a git repo — cannot wire submodule."
+[ -e "$SHOWCASE_ROOT/.git" ] || die "$PROJECT: showcase root ($SHOWCASE_ROOT) is not a git repo — cannot wire submodule."
 
 if [ -e "$SHOWCASE_ROOT/$SM_PATH/.git" ]; then
   # Existing submodule — origin-guard, fetch, checkout the pushed main tip.
