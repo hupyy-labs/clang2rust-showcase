@@ -7,15 +7,18 @@
 # the showcase.
 #
 # Stages (each resumable / idempotent):
-#   1. build cpp2rust (ninja) + unsafe_census (cargo --release).
+#   1. build cpp2rust (ninja) + verify cargo-geiger v0.13.0 is installed
+#      (the scorer of record; the in-house unsafe_census is retired).
 #   2. ensure the showcase repo is on `main`; note dataset cache state
 #      (the actual fetch is idempotent inside run_crust_bench.sh, stage 3).
 #   3. two-mode CRUST sweep over all 100 projects (delegates to
 #      run_crust_bench.sh -> run_crust_project.sh, which self-contains BOTH the
-#      SAFE and FAITHFUL emits) + SQLite two-mode (§7): emit SAFE + FAITHFUL over
-#      the 281-TU SQLite CDB, census both, reduce -> benchmarks/sqlite-sites.tsv.
-#   4. reduce — the per-project TSVs already carry all r_*/f_*/per-fn keys.
-#   5. render — generate_report.py --update RESULTS.md (+ the SQLite TSVs).
+#      SAFE and FAITHFUL emits + geiger-scores each) + SQLite two-mode (§7):
+#      emit SAFE + FAITHFUL over the 84-TU CLI link set, geiger-score both
+#      INLINE, store the raw per-mode JSONs at
+#      benchmarks/sqlite-geiger-{safe,faithful}.json (one file per mode).
+#   4. reduce — the per-project TSVs already carry the g_*/gf_* geiger keys.
+#   5. render — generate_report.py --update RESULTS.md (+ SQLite status/JSONs).
 #   6. publish the 100 per-project mirrors as showcase submodules
 #      (crust_mirror_publish.sh) — GATED behind --publish (default DRY-RUN).
 #   7. commit the showcase (RESULTS.md + .gitmodules + mirror pointer bumps) and
@@ -46,18 +49,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHOWCASE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CPP2RUST_REPO="$(cd "$SCRIPT_DIR/../../cpp-to-rust" && pwd)"
 CPP_BUILD_DIR="$CPP2RUST_REPO/cpp/build"
-RUST_DIR="$CPP2RUST_REPO/rust"
 CPP2RUST_BIN="$CPP_BUILD_DIR/bin/cpp2rust"
-UNSAFE_CENSUS_BIN="$RUST_DIR/target/release/unsafe_census"
+GEIGER_SCORE_SH="$CPP2RUST_REPO/bench/metrics/geiger_score.sh"
 
 RUN_CRUST_BENCH="$SCRIPT_DIR/run_crust_bench.sh"
-SQLITE_REDUCER="$SCRIPT_DIR/sqlite_sites_from_funnel.py"
 GENERATE_REPORT="$SCRIPT_DIR/generate_report.py"
 MIRROR_PUBLISH="$SCRIPT_DIR/crust_mirror_publish.sh"
 
 RESULTS_MD="${RESULTS_MD:-$SHOWCASE_ROOT/RESULTS.md}"
 SQLITE_STATUS_TSV="${SQLITE_STATUS_TSV:-$SCRIPT_DIR/sqlite-status.tsv}"
-SQLITE_SITES_TSV="${SQLITE_SITES_TSV:-$SCRIPT_DIR/sqlite-sites.tsv}"
+# Per-mode geiger measurements of record — MODE-NAMED files, one per mode,
+# never a shared path (so one mode's run can never overwrite the other's).
+SQLITE_GEIGER_FAITHFUL="${SQLITE_GEIGER_FAITHFUL:-$SCRIPT_DIR/sqlite-geiger-faithful.json}"
+SQLITE_GEIGER_SAFE="${SQLITE_GEIGER_SAFE:-$SCRIPT_DIR/sqlite-geiger-safe.json}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clang2rust/crust-bench"
 DATASET_DIR="$CACHE_DIR/dataset"
@@ -128,19 +132,23 @@ project_list() {
 # Stage 1 — build the two instruments (idempotent; ninja/cargo no-op if fresh).
 # ---------------------------------------------------------------------------
 stage_build() {
-  banner "STAGE 1/7  build cpp2rust + unsafe_census"
+  banner "STAGE 1/7  build cpp2rust + verify cargo-geiger"
   if [ -d "$CPP_BUILD_DIR" ]; then
     log "ninja cpp2rust  ($CPP_BUILD_DIR)"
     ( cd "$CPP_BUILD_DIR" && ninja cpp2rust )
   else
     log "warning: $CPP_BUILD_DIR missing — expecting a prebuilt $CPP2RUST_BIN"
   fi
-  log "cargo build -p unsafe_census --release  ($RUST_DIR)"
-  ( cd "$RUST_DIR" && cargo build -p unsafe_census --release )
-  [ -x "$CPP2RUST_BIN" ]      || { echo "error: cpp2rust not built: $CPP2RUST_BIN" >&2; exit 1; }
-  [ -x "$UNSAFE_CENSUS_BIN" ] || { echo "error: unsafe_census not built: $UNSAFE_CENSUS_BIN" >&2; exit 1; }
-  log "cpp2rust:      $CPP2RUST_BIN"
-  log "unsafe_census: $UNSAFE_CENSUS_BIN"
+  [ -x "$CPP2RUST_BIN" ] || { echo "error: cpp2rust not built: $CPP2RUST_BIN" >&2; exit 1; }
+  [ -f "$GEIGER_SCORE_SH" ] || { echo "error: geiger_score.sh not found: $GEIGER_SCORE_SH" >&2; exit 1; }
+  local gv; gv="$(cargo geiger --version 2>/dev/null | awk '{print $2}')"
+  if [ "$gv" != "0.13.0" ]; then
+    echo "error: cargo-geiger 0.13.0 required (found: '${gv:-not installed}')." >&2
+    echo "       Install with:  cargo install cargo-geiger --locked" >&2
+    exit 1
+  fi
+  log "cpp2rust:     $CPP2RUST_BIN"
+  log "cargo-geiger: $gv (scorer of record; runner: $GEIGER_SCORE_SH)"
 }
 
 # ---------------------------------------------------------------------------
@@ -168,7 +176,7 @@ stage_prepare() {
 # ---------------------------------------------------------------------------
 stage_sweep() {
   banner "STAGE 3/7  two-mode CRUST sweep (-P${JOBS})"
-  local args=(--transpiler "$CPP2RUST_BIN" --census "$UNSAFE_CENSUS_BIN" --jobs "$JOBS")
+  local args=(--transpiler "$CPP2RUST_BIN" --geiger "$GEIGER_SCORE_SH" --jobs "$JOBS")
   local sel; sel="$(project_list | tr '\n' ' ')"
   if [ -n "$ONLY" ] || [ -n "$SUBSET" ]; then
     [ -n "$sel" ] || { log "no projects selected — skipping sweep"; return 0; }
@@ -199,7 +207,7 @@ emit_retry() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage 3b — SQLite two-mode (§7): emit SAFE + FAITHFUL, census both, reduce.
+# Stage 3b — SQLite two-mode (§7): emit SAFE + FAITHFUL, geiger-score both.
 # ---------------------------------------------------------------------------
 stage_sqlite() {
   banner "STAGE 3/7  SQLite two-mode (§7)"
@@ -240,7 +248,6 @@ PY
   fi
 
   local safe_out="$SQLITE_WORK/safe" faithful_out="$SQLITE_WORK/faithful"
-  local safe_census="$SQLITE_WORK/census.safe.txt" faithful_census="$SQLITE_WORK/census.faithful.txt"
 
   log "emit SAFE (uplift) over the 84-TU link set"
   if ! emit_retry "$safe_out" \
@@ -258,12 +265,12 @@ PY
     log "warning: SQLite FAITHFUL emit failed after retries — skipping SQLite row (non-fatal)"; return 0
   fi
 
-  log "census both emissions"
-  "$UNSAFE_CENSUS_BIN" "$safe_out"     > "$safe_census"
-  "$UNSAFE_CENSUS_BIN" "$faithful_out" > "$faithful_census"
-
-  log "reduce -> $SQLITE_SITES_TSV"
-  python3 "$SQLITE_REDUCER" "$faithful_census" "$safe_census" > "$SQLITE_SITES_TSV"
+  # geiger-score both emissions INLINE (the temp dirs are wiped on exit) and
+  # store each mode's RAW geiger JSON in its own mode-named benchmarks/ file.
+  log "geiger-score SAFE -> $SQLITE_GEIGER_SAFE"
+  GEIGER_SCRATCH="$TEMP_DIR/geiger" bash "$GEIGER_SCORE_SH" "$safe_out" safe "$SQLITE_GEIGER_SAFE"     || { log "warning: SQLite SAFE geiger scoring failed — skipping SQLite row (non-fatal)"; return 0; }
+  log "geiger-score FAITHFUL -> $SQLITE_GEIGER_FAITHFUL"
+  GEIGER_SCRATCH="$TEMP_DIR/geiger" bash "$GEIGER_SCORE_SH" "$faithful_out" faithful "$SQLITE_GEIGER_FAITHFUL"     || { log "warning: SQLite FAITHFUL geiger scoring failed — skipping SQLite row (non-fatal)"; return 0; }
 }
 
 # ---------------------------------------------------------------------------
@@ -275,7 +282,8 @@ stage_report() {
   local args=("$RESULTS_DIR")
   [ -d "$CBENCH_DIR" ] && args+=("$CBENCH_DIR")
   [ -f "$SQLITE_STATUS_TSV" ] && args+=(--sqlite-status "$SQLITE_STATUS_TSV")
-  [ -f "$SQLITE_SITES_TSV" ]  && args+=(--sqlite-sites "$SQLITE_SITES_TSV")
+  [ -f "$SQLITE_GEIGER_FAITHFUL" ] && args+=(--sqlite-geiger-faithful "$SQLITE_GEIGER_FAITHFUL")
+  [ -f "$SQLITE_GEIGER_SAFE" ] && args+=(--sqlite-geiger-safe "$SQLITE_GEIGER_SAFE")
   args+=(--update "$RESULTS_MD")
   python3 "$GENERATE_REPORT" "${args[@]}"
   log "RESULTS.md updated"
@@ -342,7 +350,7 @@ main() {
 
   banner "DONE [$MODE]"
   log "RESULTS.md:      $RESULTS_MD"
-  log "sqlite-sites:    $SQLITE_SITES_TSV"
+  log "sqlite geiger:   $SQLITE_GEIGER_FAITHFUL + $SQLITE_GEIGER_SAFE"
   log "per-project TSV: $RESULTS_DIR"
   [ "$PUBLISH" -eq 1 ] || log "this was a DRY-RUN — re-run with --publish to push mirrors + showcase"
 }

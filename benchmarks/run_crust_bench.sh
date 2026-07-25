@@ -2,7 +2,7 @@
 #
 # run_crust_bench.sh — score clang2rust against ALL 100 CRUST-bench projects,
 # running each through the SAME 6-stage differential process as SQLite plus
-# the two test oracles and the per-operation unsafe-SITE census.
+# the two test oracles and the two-mode cargo-geiger safety measurement.
 #
 # CRUST-bench (https://github.com/anirudhkhatry/CRUST-bench) is a published
 # benchmark of 100 C repositories, each paired with a hand-written safe-Rust
@@ -12,15 +12,16 @@
 # external, git-ignored cache, then fans `run_crust_project.sh` out over every
 # project at moderate parallelism, and finally aggregates a summary + renders
 # the published report. All the real per-project work (compile_commands
-# synthesis, the 6 stages, A/B, pass@1, site census) lives in the
+# synthesis, the 6 stages, A/B, pass@1, two-mode geiger scoring) lives in the
 # project-agnostic driver `run_crust_project.sh` (DESIGN.md D1).
 #
 # Usage:
-#   run_crust_bench.sh [--transpiler <path>] [--census <path>] [--cache <dir>]
+#   run_crust_bench.sh [--transpiler <path>] [--geiger <path>] [--cache <dir>]
 #                      [--jobs N] [--only "p1 p2 …"] [--dry-run]
 #
 #   --transpiler <path>  cpp2rust binary. Default: the worktree/main build.
-#   --census <path>      unsafe_census binary (extended, operation-level).
+#   --geiger <path>      bench/metrics/geiger_score.sh (the shared cargo-geiger
+#                        runner in the parent repo).
 #   --cache <dir>        External, git-ignored dataset+results cache.
 #                        Default: $XDG_CACHE_HOME/clang2rust/crust-bench.
 #   --jobs N             Parallel projects (default 4 — MODERATE, leaves CPU
@@ -28,26 +29,30 @@
 #   --only "…"           Space-separated project subset (pilot runs).
 #   --dry-run            Print the plan and exit.
 #
-# Requirements: the two binaries (built), cargo/rustc, clang++/clang (C++26 +
-# libc++), curl+unzip (fetch), and `bear` for Makefile-only projects.
+# Requirements: cpp2rust (built), cargo-geiger v0.13.0, cargo/rustc,
+# clang++/clang (C++26 + libc++), curl+unzip (fetch), and `bear` for
+# Makefile-only projects.
 #
 # Outputs (under the --cache dir, alongside the dataset):
-#   results/<project>.tsv   Per-project honest funnel row (driver schema).
-#   results/summary.tsv     Aggregate funnel across all projects.
-#   results/REPORT.md       Rendered site-granular report (cache-local copy).
+#   results/<project>.tsv   Per-project honest driver row (g_*/gf_* geiger keys).
+#   results/<project>/geiger-{safe,faithful}.json  Per-mode raw geiger JSON
+#                           (the measurements of record; one file per mode).
+#   results/summary.tsv     Aggregate across all projects.
+#   results/REPORT.md       Rendered two-mode report (cache-local copy).
 #
 # Also, at the end of a sweep, the PUBLISHED showcase report is kept in sync:
 # generate_report.py is invoked with --update RESULTS.md + --sqlite-status +
-# --sqlite-sites so the canonical benchmarks/../RESULTS.md does not drift from
-# results/REPORT.md (TWO_MODE_CONTRACT.md §5/§9.5). The per-project driver
-# self-contains BOTH emits (safe + faithful, contract §1), so no two-mode env
-# toggles are threaded through this orchestrator — it only fans the driver out.
+# the two SQLite per-mode geiger JSONs so the canonical benchmarks/../RESULTS.md
+# does not drift from results/REPORT.md (TWO_MODE_CONTRACT.md §5/§9.5). The
+# per-project driver self-contains BOTH emits (safe + faithful, contract §1),
+# so no two-mode env toggles are threaded through this orchestrator — it only
+# fans the driver out.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRANSPILER="${TRANSPILER:-${SCRIPT_DIR}/../../cpp-to-rust/cpp/build/bin/cpp2rust}"
-UNSAFE_CENSUS_BIN="${UNSAFE_CENSUS_BIN:-${SCRIPT_DIR}/../../cpp-to-rust/rust/target/release/unsafe_census}"
+GEIGER_SCORE="${GEIGER_SCORE:-${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/clang2rust/crust-bench"
 JOBS=4
 ONLY=""
@@ -61,7 +66,7 @@ usage() { sed -n '2,/^set -uo pipefail/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\
 while [ $# -gt 0 ]; do
   case "$1" in
     --transpiler) TRANSPILER="$2"; shift 2 ;;
-    --census) UNSAFE_CENSUS_BIN="$2"; shift 2 ;;
+    --geiger) GEIGER_SCORE="$2"; shift 2 ;;
     --cache) CACHE_DIR="$2"; shift 2 ;;
     --jobs) JOBS="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
@@ -77,10 +82,12 @@ RBENCH_DIR="${DATASET_DIR}/RBench"
 RESULTS_DIR="${CACHE_DIR}/results"
 SUMMARY_TSV="${RESULTS_DIR}/summary.tsv"
 
-# Published showcase report + SQLite two-mode TSVs (kept in sync post-sweep).
+# Published showcase report + SQLite status TSV + per-mode geiger JSONs
+# (kept in sync post-sweep).
 RESULTS_MD="${RESULTS_MD:-${SCRIPT_DIR}/../RESULTS.md}"
 SQLITE_STATUS_TSV="${SQLITE_STATUS_TSV:-${SCRIPT_DIR}/sqlite-status.tsv}"
-SQLITE_SITES_TSV="${SQLITE_SITES_TSV:-${SCRIPT_DIR}/sqlite-sites.tsv}"
+SQLITE_GEIGER_FAITHFUL="${SQLITE_GEIGER_FAITHFUL:-${SCRIPT_DIR}/sqlite-geiger-faithful.json}"
+SQLITE_GEIGER_SAFE="${SQLITE_GEIGER_SAFE:-${SCRIPT_DIR}/sqlite-geiger-safe.json}"
 
 log() { printf '[run_crust_bench] %s\n' "$*" >&2; }
 
@@ -143,15 +150,15 @@ N = len(rows)
 def count(pred): return sum(1 for r in rows if pred(r))
 
 fields = ["transpiled_cpp","cpp_crates","compiled_cpp","transpiled_rust","rust_crates",
-          "compiled_rust","ab_cpp","ab_rust","pass1","c_sites","r_sites","note"]
+          "compiled_rust","ab_cpp","ab_rust","pass1",
+          "gf_ok","gf_exprs_unsafe","g_ok","g_exprs_unsafe","note"]
 print("project\t" + "\t".join(fields))
 for r in rows:
     print(r.get("project","?") + "\t" + "\t".join(r.get(k,"") for k in fields))
 
-fam_c = ["c_raw_ptr_deref","c_static_mut","c_union_member","c_unchecked_arith"]
-fam_r = ["r_raw_ptr_deref","r_extern_unsafe_call","r_static_mut","r_union_read",
-         "r_transmute","r_inline_asm","r_unchecked_arith","r_unsafe_blocks"]
-tot = lambda k: sum(gi(r, k) for r in rows)
+measured = [r for r in rows if r.get("g_ok") == "1" and r.get("gf_ok") == "1"]
+before = sum(gi(r, "gf_exprs_unsafe") for r in measured)
+after = sum(gi(r, "g_exprs_unsafe") for r in measured)
 
 print()
 print(f"# aggregate over {N} projects")
@@ -162,9 +169,8 @@ print(f"# compiled_rust=full:   {count(lambda r: ratio_full(r,'compiled_rust'))}
 print(f"# ab_cpp=pass:          {count(lambda r: r.get('ab_cpp')=='pass')}/{N}")
 print(f"# ab_rust=pass:         {count(lambda r: r.get('ab_rust')=='pass')}/{N}")
 print(f"# pass1=pass:           {count(lambda r: r.get('pass1')=='pass')}/{N}")
-print(f"# C  unsafe sites total: {tot('c_sites')}   " + " ".join(f"{k}={tot(k)}" for k in fam_c))
-print(f"# Rust unsafe sites total: {tot('r_sites')}  " + " ".join(f"{k}={tot(k)}" for k in fam_r))
-print(f"# Rust total exprs (UOD denom): {tot('rust_exprs')}")
+print(f"# geiger both-mode measured: {len(measured)}/{N}")
+print(f"# geiger unsafe exprs: before(faithful)={before} after(safe)={after}")
 PY
   log "summary written to $SUMMARY_TSV"
   # Render the published site-granular report (SQLite consumes its own site
@@ -182,7 +188,8 @@ PY
   if command -v python3 >/dev/null 2>&1 && [ -f "$RESULTS_MD" ]; then
     local gr_args=("$RESULTS_DIR" "$CBENCH_DIR")
     [ -f "$SQLITE_STATUS_TSV" ] && gr_args+=(--sqlite-status "$SQLITE_STATUS_TSV")
-    [ -f "$SQLITE_SITES_TSV" ] && gr_args+=(--sqlite-sites "$SQLITE_SITES_TSV")
+    [ -f "$SQLITE_GEIGER_FAITHFUL" ] && gr_args+=(--sqlite-geiger-faithful "$SQLITE_GEIGER_FAITHFUL")
+    [ -f "$SQLITE_GEIGER_SAFE" ] && gr_args+=(--sqlite-geiger-safe "$SQLITE_GEIGER_SAFE")
     gr_args+=(--update "$RESULTS_MD")
     if python3 "${SCRIPT_DIR}/generate_report.py" "${gr_args[@]}" \
          >>"${RESULTS_DIR}/report.err" 2>&1; then
@@ -198,7 +205,7 @@ PY
 # ---------------------------------------------------------------------------
 main() {
   log "transpiler:  $TRANSPILER"
-  log "census:      $UNSAFE_CENSUS_BIN"
+  log "geiger:      $GEIGER_SCORE"
   log "cache dir:   $CACHE_DIR"
   log "jobs:        $JOBS"
 
@@ -211,7 +218,7 @@ main() {
   fi
 
   [ -x "$TRANSPILER" ] || { echo "error: transpiler not executable: $TRANSPILER" >&2; exit 1; }
-  [ -x "$UNSAFE_CENSUS_BIN" ] || { echo "error: unsafe_census not executable: $UNSAFE_CENSUS_BIN" >&2; exit 1; }
+  [ -f "$GEIGER_SCORE" ] || { echo "error: geiger_score.sh not found: $GEIGER_SCORE" >&2; exit 1; }
 
   mkdir -p "$RESULTS_DIR"
   fetch_dataset
@@ -225,7 +232,7 @@ main() {
     projects="$(cd "$CBENCH_DIR" && for d in */; do [ -d "$d" ] && printf '%s\n' "${d%/}"; done)"
   fi
 
-  export TRANSPILER UNSAFE_CENSUS_BIN CACHE_DIR RESULTS_DIR
+  export TRANSPILER GEIGER_SCORE CACHE_DIR RESULTS_DIR
   log "scoring $(printf '%s\n' $projects | wc -l | tr -d ' ') projects at -P${JOBS}"
   printf '%s\n' $projects | xargs -P "$JOBS" -I {} bash "${SCRIPT_DIR}/run_crust_project.sh" {}
 

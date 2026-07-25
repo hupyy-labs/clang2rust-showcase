@@ -12,9 +12,9 @@ that compiles and behaves identically to the original.
 | Metric | Result |
 |---|---|
 | Compiles | 281 / 281 SQLite corpus translation units produce Rust that compiles (rustc obj-OK) |
-| Behavioral parity | The complete SQLite command-line shell, transpiled to Rust, is byte-identical to the native build across 10 SQL test scripts, reproduced 3× under an allocator-hardened harness. Flagship row: [RESULTS.md](RESULTS.md#flagship--sqlite) |
-| Safety | 67.4% of generated Rust functions are fully safe (no `unsafe`); memory-unsafe constructs reduced 45.9% vs. a faithful raw-pointer baseline (further ownership work in progress) |
-| CRUST-bench (100 third-party C repos) | 18 projects convert end-to-end to fully-compiling Rust; 50% of all emitted crates compile (117/233). 19 of the 100 have broken builds of their own and could not be attempted. Full breakdown: [RESULTS.md](RESULTS.md) |
+| Behavioral parity | The complete SQLite command-line shell, transpiled to Rust, is byte-identical to the native build across 10 SQL test scripts, reproduced 3× under an allocator-hardened harness. Flagship row: [RESULTS.md](RESULTS.md) |
+| Safety | Measured two-mode by [cargo-geiger v0.13.0](https://crates.io/crates/cargo-geiger): each project is transpiled without and with safety uplifting, and both Rust outputs are geiger-scored. Fresh sweep numbers pending — see [RESULTS.md](RESULTS.md) |
+| CRUST-bench (100 third-party C repos) | Full two-mode sweep pending under the cargo-geiger instrument — per-project table in [RESULTS.md](RESULTS.md) |
 | Release | 0.22.0 |
 
 *Measured on the [SQLite](https://www.sqlite.org/) separate-file source tree
@@ -65,18 +65,18 @@ We run our transpiler over the **[CRUST-Bench](https://arxiv.org/abs/2504.15254)
 
 CRUST-Bench does **not** mechanically gate safety: there is no `#![forbid(unsafe_code)]`, `libc` is an allowed dependency (its own reference tests call `unsafe { libc::… }`), and unsafe usage is only tallied *post-hoc* as a coarse per-project flag ("does the output contain the `unsafe` keyword?"). It also **excludes** syntax-directed transpilers such as c2rust for producing too much unsafe/FFI Rust.
 
-**This project** is a *deterministic* AST transpiler — the class CRUST-Bench excludes — and it measures safety at a **finer grain**: a per-operation **unsafe-site census** (raw-pointer deref, extern/unsafe call, `static mut`, union read, transmute, inline asm) and an **Unsafe-Operation Density** (sites ÷ total expressions), computed in **two modes over identical source**:
-- **faithful** — our safety uplift *disabled*: a raw, unsafe-preserving lowering, comparable in spirit to a syntax-directed transpiler;
-- **safe** — our safety uplift *enabled* (the production default).
+**This project** is a *deterministic* AST transpiler — the class CRUST-Bench excludes — and it measures safety with a community-standard instrument: [**cargo-geiger v0.13.0**](https://crates.io/crates/cargo-geiger), which counts unsafe usage (the table reports its unsafe-**expression** count — individual unsafe operations inside unsafe code), applied to **two Rust emissions of identical source**:
+- **before** — safety uplifting *disabled*: a raw, unsafe-preserving lowering, comparable in spirit to a syntax-directed transpiler;
+- **after** — safety uplifting *enabled* (the production default).
 
-The **faithful → safe** delta isolates exactly what our uplift removes — information CRUST-Bench's binary flag cannot express.
+The **before → after** delta isolates exactly what our uplift removes — information CRUST-Bench's binary flag cannot express.
 
 **How to read our numbers, honestly:**
-- Our safety columns (Non-safe / Safe Sites, Site Reduction %, UOD, Unsafe Fns, Fns Made Safe) are **our own instrument**; there is no CRUST-Bench number to compare them to, and we do **not** claim to "beat" CRUST-Bench on safety.
-- The only columns that map to CRUST-Bench's published methodology are **Compiled** (≈ their Build) and **Tested / pass@1** (≈ their Test). Our pass@1 is produced differently (a mechanical splice against the reference interface, not an LLM fill-and-repair loop), so it is **not** directly comparable either.
+- Our Unsafe (before)/(after)/Change columns compare our own two emissions with a third-party detector; there is no CRUST-Bench number to compare them to, and we do **not** claim to "beat" CRUST-Bench on safety.
+- The only columns that map to CRUST-Bench's published methodology are **Built** (≈ their Build) and **Tests / pass@1** (≈ their Test). Our pass@1 is produced differently (a mechanical splice against the reference interface, not an LLM fill-and-repair loop), so it is **not** directly comparable either.
 - Because we preserve C semantics and A/B-verify behavior, our output keeps `unsafe extern` at genuine libc/FFI edges (e.g. the SQLite lane). By CRUST-Bench's binary "no unsafe" rule that counts as unsafe — an intentional trade-off: we prioritize behavioral fidelity over an all-safe surface at the C boundary.
 
-**The claim we do stand behind:** over the same corpus, our uplift *measurably reduces unsafe operations* relative to a raw, c2rust-style lowering of the identical source — a reduction their coarse safety flag cannot see.
+**The claim we do stand behind:** over the same corpus, our uplift *measurably reduces unsafe expressions* relative to a raw, c2rust-style lowering of the identical source — a reduction their coarse safety flag cannot see.
 
 ---
 
@@ -103,8 +103,8 @@ result — we're publishing it anyway, as an honest baseline rather than a
 number to hide.
 
 Results: [`RESULTS.md`](RESULTS.md) — the SQLite flagship row plus the
-CRUST-bench first run recorded 2026-07-20 (Tier-1 18/100; full honest
-per-class breakdown).
+per-project CRUST-bench table. The first full sweep under the cargo-geiger
+instrument is pending; the table says so plainly until it runs.
 
 ### Reproduce
 
