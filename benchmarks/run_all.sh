@@ -47,7 +47,14 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHOWCASE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CPP2RUST_REPO="$(cd "$SCRIPT_DIR/../../cpp-to-rust" && pwd)"
+# Parent transpiler repo — two supported layouts (same dual-layout rule as
+# geiger_score.sh): (a) showcase is a SUBMODULE of the repo → ../../ IS the
+# repo; (b) standalone sibling clone → ../../cpp-to-rust next to the showcase.
+if [ -d "$SHOWCASE_ROOT/../cpp" ] && [ -d "$SHOWCASE_ROOT/../bench" ]; then
+  CPP2RUST_REPO="$(cd "$SHOWCASE_ROOT/.." && pwd)"
+else
+  CPP2RUST_REPO="$(cd "$SCRIPT_DIR/../../cpp-to-rust" && pwd)"
+fi
 CPP_BUILD_DIR="$CPP2RUST_REPO/cpp/build"
 CPP2RUST_BIN="$CPP_BUILD_DIR/bin/cpp2rust"
 GEIGER_SCORE_SH="$CPP2RUST_REPO/bench/metrics/geiger_score.sh"
