@@ -32,6 +32,9 @@ against the original across real workloads.*
 | Full control flow, including `goto` | Structured Rust control flow | Shipped |
 | Variadic functions | Typed Rust collections | Shipped |
 | `switch` / `case`, static-local variables | Idiomatic Rust `match` and statics | Shipped |
+| Preprocessor `#define` constants, alias & expression macros | Named `pub const` items — `if (rc == SQLITE_OK)` stays symbolic instead of collapsing to `if (rc == 0)`; authorial spellings (`0x10`) preserved; 10,900+ constants recovered across the SQLite corpus | Shipped |
+| Function-like macros (single-expression) | Real Rust functions; any call site where a fold would change semantics (side-effecting arguments, shadowed names, write-through uses) stays faithfully expanded | Shipped |
+| System limit macros (`INT_MAX`, `SIZE_MAX`, `UINT8_MAX`, …) | Rust std constants (`i32::MAX`, `usize::MAX`, `u8::MAX`, …) | Shipped |
 | Unions with a provable discriminant | Tagged Rust `enum`s | Shipped |
 | Smart pointers | `Box`, `Rc`, `Arc` | Shipped |
 | Raw pointers | Safe references, via borrow inference | In progress |
