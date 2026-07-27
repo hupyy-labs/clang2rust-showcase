@@ -2,7 +2,7 @@
 #
 # run_crust_project.sh <project> — run ONE CRUST-bench C project through the
 # same 6-stage differential process as SQLite, plus the two test oracles and
-# the per-operation unsafe-SITE census, and emit a single honest funnel row.
+# the TWO-MODE cargo-geiger safety measurement, and emit a single honest row.
 #
 # This is the project-agnostic driver (DESIGN.md D1) that reuses the generic
 # 6-stage bricks — it does NOT depend on any SQLite-specific glue
@@ -14,13 +14,18 @@
 #   stage1  C -> C++     (cpp2rust --emit=cpp)
 #   stage2  compile C++  (clang++ -std=c++26 -stdlib=libc++, per-TU object)
 #   stage3  A/B          native-C binary vs transpiled-C++ binary (best-effort)
-#   stage4  C -> Rust    (cpp2rust --emit=rust)
+#   stage4  C -> Rust    (cpp2rust --emit=rust) — TWICE: safe (production
+#           default, uplift ON) and faithful (lab factory, uplift OFF)
 #   stage5  build Rust   (rustc --crate-type=lib --emit=obj, per crate)
 #   stage6  A/B          native-C binary vs transpiled-Rust binary (best-effort)
 #   pass@1  CRUST-bench official: splice emitted crate under the RBench
 #           interface -> `cargo test` (best-effort)
-#   sites   C-initial unsafe sites (cpp2rust --emit=funnel-ingest) vs
-#           Rust-resulting unsafe sites (extended unsafe_census), per family.
+#   geiger  BOTH emissions scored by cargo-geiger v0.13.0 via the shared
+#           runner bench/metrics/geiger_score.sh. The per-mode RAW geiger
+#           JSON (the measurement of record) is stored in MODE-NAMED files —
+#           <results>/<project>/geiger-safe.json and geiger-faithful.json —
+#           so one mode's run can never overwrite the other's measurement.
+#           (The census-era C-side/unsafe_census scoring is RETIRED.)
 #
 # The native-vs-transpiled A/B links the emitted per-TU objects into one
 # binary. For multi-TU projects this frequently fails (cross-TU C++ name
@@ -29,11 +34,11 @@
 #
 # Output: one tab-separated key=value line to `<results>/<project>.tsv`, and a
 # full log to `<results>/<project>/driver.log`. The row's schema is consumed
-# by generate_report.py (site-granular columns).
+# by generate_report.py (g_* = safe/after, gf_* = faithful/before).
 #
 # Env (all have defaults; the orchestrator sets the first three):
 #   TRANSPILER          cpp2rust binary   (freshly built in the worktree)
-#   UNSAFE_CENSUS_BIN   unsafe_census binary (extended, operation-level)
+#   GEIGER_SCORE        bench/metrics/geiger_score.sh (parent repo)
 #   CACHE_DIR           dataset+results cache root
 #   CXX / CC / RUSTC    toolchain (default: Homebrew LLVM clang++/clang; rustup)
 #   *_TIMEOUT           per-step wall-clock limits (seconds)
@@ -54,7 +59,18 @@ RBENCH_DIR="${DATASET_DIR}/RBench"
 RESULTS_DIR="${RESULTS_DIR:-${CACHE_DIR}/results}"
 
 TRANSPILER="${TRANSPILER:-${SCRIPT_DIR}/../../cpp-to-rust/cpp/build/bin/cpp2rust}"
-UNSAFE_CENSUS_BIN="${UNSAFE_CENSUS_BIN:-${SCRIPT_DIR}/../../cpp-to-rust/rust/target/release/unsafe_census}"
+# geiger_score.sh lives in the parent transpiler repo. Two supported layouts:
+# showcase as a SIBLING checkout (../../cpp-to-rust/...) and showcase as the
+# cpp-to-rust SUBMODULE (../../bench/...).
+_default_geiger() {
+  local c
+  for c in "${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh" \
+           "${SCRIPT_DIR}/../../bench/metrics/geiger_score.sh"; do
+    [ -f "$c" ] && { echo "$c"; return; }
+  done
+  echo "${SCRIPT_DIR}/../../cpp-to-rust/bench/metrics/geiger_score.sh"
+}
+GEIGER_SCORE="${GEIGER_SCORE:-$(_default_geiger)}"
 
 pick() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { echo "$c"; return; }; done; echo "$1"; }
 CXX="${CXX:-$(pick /opt/homebrew/opt/llvm/bin/clang++ clang++)}"
@@ -106,74 +122,89 @@ ROW[transpiled_rust]="no"; ROW[rust_crates]="0/0"
 ROW[compiled_rust]="0/0"
 ROW[ab_cpp]="na"; ROW[ab_rust]="na"; ROW[pass1]="na"
 ROW[ab_note]=""; ROW[pass1_note]=""
-ROW[c_raw_ptr_deref]=0; ROW[c_static_mut]=0; ROW[c_union_member]=0; ROW[c_unchecked_arith]=0
-ROW[c_sites]=0; ROW[c_total_exprs]=0
-ROW[r_raw_ptr_deref]=0; ROW[r_extern_unsafe_call]=0; ROW[r_first_party_call]=0; ROW[r_intrinsic_call]=0; ROW[r_boundary_reborrow]=0; ROW[r_static_mut]=0; ROW[r_union_read]=0
-ROW[r_transmute]=0; ROW[r_inline_asm]=0; ROW[r_unchecked_arith]=0; ROW[r_unsafe_blocks]=0
-ROW[r_sites]=0; ROW[rust_exprs]=0
 ROW[note]=""
-# --- two-mode faithful (non-safe) emission: NEW f_* site keys (contract §1/§3) ---
-ROW[f_raw_ptr_deref]=0; ROW[f_extern_unsafe_call]=0; ROW[f_boundary_reborrow]=0; ROW[f_static_mut]=0; ROW[f_union_read]=0
-ROW[f_transmute]=0; ROW[f_inline_asm]=0; ROW[f_sites]=0; ROW[f_total_exprs]=0
-# --- per-function metrics (contract §4) ---
-ROW[total_fns]=0; ROW[unsafe_fns_safe]=0; ROW[unsafe_fns_faithful]=0; ROW[fns_made_safe]=0
-# --- both-mode parse gate + best-effort faithful build (contract §5/§10) ---
-ROW[safe_parse_errors]=0; ROW[faithful_parse_errors]=0
 ROW[compiled_rust_faithful]="n/a"
+# --- two-mode cargo-geiger keys: g_* = safe (after), gf_* = faithful (before).
+# ALL FIVE geiger categories stored per mode (functions/exprs/impls/traits/
+# methods, each safe/unsafe_) + forbids_unsafe + the per-mode ok gate.
+for _m in g gf; do
+  ROW[${_m}_ok]=0
+  ROW[${_m}_fns_safe]=0;     ROW[${_m}_fns_unsafe]=0
+  ROW[${_m}_exprs_safe]=0;   ROW[${_m}_exprs_unsafe]=0
+  ROW[${_m}_impls_safe]=0;   ROW[${_m}_impls_unsafe]=0
+  ROW[${_m}_traits_safe]=0;  ROW[${_m}_traits_unsafe]=0
+  ROW[${_m}_methods_safe]=0; ROW[${_m}_methods_unsafe]=0
+  ROW[${_m}_forbids_unsafe]=0
+done
 
 emit_row() {
   local out="" k
   for k in project tus transpiled_cpp cpp_crates compiled_cpp transpiled_rust rust_crates \
-           compiled_rust ab_cpp ab_rust pass1 ab_note pass1_note \
-           c_raw_ptr_deref c_static_mut c_union_member c_unchecked_arith c_sites c_total_exprs \
-           r_raw_ptr_deref r_extern_unsafe_call r_first_party_call r_intrinsic_call r_boundary_reborrow r_static_mut r_union_read r_transmute \
-           r_inline_asm r_unchecked_arith r_unsafe_blocks r_sites rust_exprs note \
-           f_raw_ptr_deref f_extern_unsafe_call f_boundary_reborrow f_static_mut f_union_read f_transmute f_inline_asm \
-           f_sites f_total_exprs \
-           total_fns unsafe_fns_safe unsafe_fns_faithful fns_made_safe \
-           safe_parse_errors faithful_parse_errors compiled_rust_faithful; do
+           compiled_rust compiled_rust_faithful ab_cpp ab_rust pass1 ab_note pass1_note note \
+           g_ok g_fns_safe g_fns_unsafe g_exprs_safe g_exprs_unsafe \
+           g_impls_safe g_impls_unsafe g_traits_safe g_traits_unsafe \
+           g_methods_safe g_methods_unsafe g_forbids_unsafe \
+           gf_ok gf_fns_safe gf_fns_unsafe gf_exprs_safe gf_exprs_unsafe \
+           gf_impls_safe gf_impls_unsafe gf_traits_safe gf_traits_unsafe \
+           gf_methods_safe gf_methods_unsafe gf_forbids_unsafe; do
     out+="${k}=${ROW[$k]}"$'\t'
   done
   printf '%s\n' "${out%$'\t'}" >"$TSV"
   log "row: $(cat "$TSV")"
 }
 
-sum_key() { # sum_key <logfile> <key> -> total across all matching lines
-  grep -hoE "$2=[0-9]+" "$1" 2>/dev/null | awk -F= '{s+=$2} END{print s+0}'
-}
+# geiger_mode_into_row <mode_out_dir> <mode-label> <row-prefix> <json_dest>
+# Scores EVERY emitted crate under <mode_out_dir> with the shared runner
+# (bench/metrics/geiger_score.sh), sums the five geiger categories into the
+# ROW keys under <row-prefix>, and stores the RAW geiger JSON (the
+# measurement of record) at <json_dest> — a MODE-NAMED file (geiger-safe.json
+# vs geiger-faithful.json), written only on a clean score, never shared
+# between modes. <row-prefix>_ok=1 iff >=1 crate emitted AND every crate
+# scored ok=1; forbids_unsafe is the AND across crates.
+geiger_mode_into_row() {
+  local mode_out="$1" mode="$2" p="$3" json_dest="$4"
+  local -a manifests=()
+  while IFS= read -r m; do [ -n "$m" ] && manifests+=("$m"); done \
+    < <(find "$mode_out" -name Cargo.toml 2>/dev/null | sort)
+  [ "${#manifests[@]}" -gt 0 ] || { log "geiger[$mode]: no crates emitted"; return; }
 
-# region_metrics <safe_census> <faithful_census> -> "total_fns unsafe_safe unsafe_faithful made_safe"
-# Per-function safety (contract §4): the 6-family site_total is bucketed by census
-# region LINE (never by distinct region string — same-named methods must count
-# separately); `fns_made_safe` is the region-key JOIN (faithful>0 AND safe==0).
-region_metrics() {
-  python3 - "$1" "$2" <<'PY'
-import sys
-FAMS = ("raw_ptr_deref", "extern_unsafe_call", "static_mut",
-        "union_read", "transmute", "inline_asm")
-def load(path):
-    lines = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for ln in f:
-                if "region=" not in ln:
-                    continue
-                kv = dict(p.split("=", 1) for p in ln.split() if "=" in p)
-                site = sum(int(kv.get(k, 0)) for k in FAMS)
-                lines.append((kv.get("region", ""), site))
-    except OSError:
-        pass
-    return lines
-safe = load(sys.argv[1])
-faith = load(sys.argv[2])
-total_fns = len(safe)                                   # bucket by LINE
-unsafe_safe = sum(1 for _, s in safe if s > 0)
-unsafe_faith = sum(1 for _, s in faith if s > 0)
-safe_d = {r: s for r, s in safe}                        # region-key join
-faith_d = {r: s for r, s in faith}
-made = sum(1 for r, s in faith_d.items() if s > 0 and safe_d.get(r, 0) == 0)
-print(total_fns, unsafe_safe, unsafe_faith, made)
-PY
+  local scratch="${OUT}/.geiger.${mode}"
+  rm -rf "$scratch"; mkdir -p "$scratch"
+  local ok=1 i=0 line vals
+  local -a jsons=()
+  local fs=0 fu=0 es=0 eu=0 is=0 iu=0 ts=0 tu=0 ms=0 mu=0 forbids=1
+  for m in "${manifests[@]}"; do
+    i=$((i + 1))
+    local j="$scratch/crate${i}.json"
+    line="$(bash "$GEIGER_SCORE" "$(dirname "$m")" "$mode" "$j" 2>>"$LOG")"
+    log "geiger[$mode] $line"
+    if [[ "$line" == *" ok=1 "* ]] && [ -f "$j" ]; then
+      jsons+=("$j")
+      vals="$(awk '{for(n=1;n<=NF;n++){split($n,kv,"=");v[kv[1]]=kv[2]}
+        print v["fns_safe"],v["fns_unsafe"],v["exprs_safe"],v["exprs_unsafe"],
+              v["impls_safe"],v["impls_unsafe"],v["traits_safe"],v["traits_unsafe"],
+              v["methods_safe"],v["methods_unsafe"],v["forbids_unsafe"]}' <<<"$line")"
+      read -r _fs _fu _es _eu _is _iu _ts _tu _ms _mu _fb <<<"$vals"
+      fs=$((fs + _fs)); fu=$((fu + _fu)); es=$((es + _es)); eu=$((eu + _eu))
+      is=$((is + _is)); iu=$((iu + _iu)); ts=$((ts + _ts)); tu=$((tu + _tu))
+      ms=$((ms + _ms)); mu=$((mu + _mu))
+      [ "$_fb" = "1" ] || forbids=0
+    else
+      ok=0
+    fi
+  done
+
+  if [ "$ok" -eq 1 ] && [ "${#jsons[@]}" -gt 0 ]; then
+    jq -s 'if length == 1 then .[0] else . end' "${jsons[@]}" > "$json_dest"
+    ROW[${p}_ok]=1
+    ROW[${p}_fns_safe]=$fs;     ROW[${p}_fns_unsafe]=$fu
+    ROW[${p}_exprs_safe]=$es;   ROW[${p}_exprs_unsafe]=$eu
+    ROW[${p}_impls_safe]=$is;   ROW[${p}_impls_unsafe]=$iu
+    ROW[${p}_traits_safe]=$ts;  ROW[${p}_traits_unsafe]=$tu
+    ROW[${p}_methods_safe]=$ms; ROW[${p}_methods_unsafe]=$mu
+    ROW[${p}_forbids_unsafe]=$forbids
+  fi
+  rm -rf "$scratch"
 }
 
 # ---------------------------------------------------------------------------
@@ -235,18 +266,6 @@ harden_cdb "$CDB"
 ROW[tus]="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$CDB" 2>/dev/null || echo 0)"
 log "cdb=$CDB tus=${ROW[tus]}"
 
-# --- sites: C-initial unsafe operation census (pre-lowering Clang AST) ---
-FUNNEL_C="${OUT}/funnel_c.log"
-run_bounded "$TRANSPILE_TIMEOUT" "$TRANSPILER" --cdb "$CDB" --emit=funnel-ingest >"$FUNNEL_C" 2>>"$LOG"
-ROW[c_raw_ptr_deref]="$(sum_key "$FUNNEL_C" raw_ptr_deref)"
-ROW[c_static_mut]="$(sum_key "$FUNNEL_C" static_mut)"
-ROW[c_union_member]="$(sum_key "$FUNNEL_C" union_member)"
-ROW[c_unchecked_arith]="$(sum_key "$FUNNEL_C" unchecked_arith)"
-ROW[c_total_exprs]="$(sum_key "$FUNNEL_C" total_exprs)"
-# "unsafe sites" total EXCLUDES the separate unchecked_arith (pointer-arith) lane.
-ROW[c_sites]=$(( ROW[c_raw_ptr_deref] + ROW[c_static_mut] + ROW[c_union_member] ))
-log "C sites=${ROW[c_sites]} (deref=${ROW[c_raw_ptr_deref]} static=${ROW[c_static_mut]} union=${ROW[c_union_member]} arith=${ROW[c_unchecked_arith]})"
-
 # --- stage1: C -> C++ ---
 rm -rf "$CPP_OUT"; mkdir -p "$CPP_OUT"
 run_bounded "$TRANSPILE_TIMEOUT" "$TRANSPILER" --cdb "$CDB" --out-dir "$CPP_OUT" --emit=cpp >>"$LOG" 2>&1
@@ -297,57 +316,23 @@ done
 ROW[compiled_rust]="${n_rust_ok}/${n_rust}"
 log "Rust compiled ${n_rust_ok}/${n_rust}"
 
-# --- sites: Rust-resulting unsafe operation census (extended unsafe_census) ---
-FUNNEL_R="${OUT}/funnel_rust.log"
-"$UNSAFE_CENSUS_BIN" "$RUST_OUT" >"$FUNNEL_R" 2>>"$LOG"
-ROW[r_raw_ptr_deref]="$(sum_key "$FUNNEL_R" raw_ptr_deref)"
-ROW[r_extern_unsafe_call]="$(sum_key "$FUNNEL_R" extern_unsafe_call)"
-ROW[r_first_party_call]="$(sum_key "$FUNNEL_R" first_party_call)"
-ROW[r_intrinsic_call]="$(sum_key "$FUNNEL_R" intrinsic_call)"
-ROW[r_boundary_reborrow]="$(sum_key "$FUNNEL_R" boundary_reborrow)"
-ROW[r_static_mut]="$(sum_key "$FUNNEL_R" static_mut)"
-ROW[r_union_read]="$(sum_key "$FUNNEL_R" union_read)"
-ROW[r_transmute]="$(sum_key "$FUNNEL_R" transmute)"
-ROW[r_inline_asm]="$(sum_key "$FUNNEL_R" inline_asm)"
-ROW[r_unchecked_arith]="$(sum_key "$FUNNEL_R" unchecked_arith)"
-ROW[r_unsafe_blocks]="$(sum_key "$FUNNEL_R" unsafe_blocks)"
-ROW[rust_exprs]="$(sum_key "$FUNNEL_R" total_exprs)"
-ROW[r_sites]=$(( ROW[r_raw_ptr_deref] + ROW[r_extern_unsafe_call] + ROW[r_static_mut] \
-               + ROW[r_union_read] + ROW[r_transmute] + ROW[r_inline_asm] ))
-ROW[safe_parse_errors]="$(sum_key "$FUNNEL_R" parse_errors)"
-log "Rust sites=${ROW[r_sites]} exprs=${ROW[rust_exprs]} parse_errors=${ROW[safe_parse_errors]}"
+# --- geiger: score the SAFE (after) emission; raw JSON -> geiger-safe.json ---
+geiger_mode_into_row "$RUST_OUT" safe g "${OUT}/geiger-safe.json"
+log "geiger safe: ok=${ROW[g_ok]} exprs_unsafe=${ROW[g_exprs_unsafe]}"
 
 # --- stage4b: C -> Rust — FAITHFUL (lab factory, all uplift segments dropped) ---
-# Contract §1: SAME casing (do NOT set C2R_RUSTIC_CASING=0) so region keys join
-# 1:1 with the safe census. f_* keys are the 6-family site census of THIS crate.
+# Contract §1: SAME casing (do NOT set C2R_RUSTIC_CASING=0) — both modes stay
+# byte-comparable apart from the uplift itself. gf_* keys carry this crate's
+# geiger score (before / no uplift).
 FAITHFUL_OUT="${OUT}/rust_faithful"
 rm -rf "$FAITHFUL_OUT"; mkdir -p "$FAITHFUL_OUT"
 run_bounded "$TRANSPILE_TIMEOUT" env C2R_LAB_FACTORY=1 C2R_LAB_DROP_POINTER=1 \
     C2R_LAB_DROP_ALLOC=1 C2R_LAB_DROP_PRINTF=1 C2R_LAB_DROP_CSTRING_GLOBAL=1 \
     "$TRANSPILER" --cdb "$CDB" --out-dir "$FAITHFUL_OUT" --emit=rust >>"$LOG" 2>&1
 
-FUNNEL_F="${OUT}/funnel_rust_faithful.log"
-"$UNSAFE_CENSUS_BIN" "$FAITHFUL_OUT" >"$FUNNEL_F" 2>>"$LOG"
-ROW[f_raw_ptr_deref]="$(sum_key "$FUNNEL_F" raw_ptr_deref)"
-ROW[f_extern_unsafe_call]="$(sum_key "$FUNNEL_F" extern_unsafe_call)"
-ROW[f_boundary_reborrow]="$(sum_key "$FUNNEL_F" boundary_reborrow)"
-ROW[f_static_mut]="$(sum_key "$FUNNEL_F" static_mut)"
-ROW[f_union_read]="$(sum_key "$FUNNEL_F" union_read)"
-ROW[f_transmute]="$(sum_key "$FUNNEL_F" transmute)"
-ROW[f_inline_asm]="$(sum_key "$FUNNEL_F" inline_asm)"
-ROW[f_total_exprs]="$(sum_key "$FUNNEL_F" total_exprs)"
-ROW[f_sites]=$(( ROW[f_raw_ptr_deref] + ROW[f_extern_unsafe_call] + ROW[f_static_mut] \
-               + ROW[f_union_read] + ROW[f_transmute] + ROW[f_inline_asm] ))
-ROW[faithful_parse_errors]="$(sum_key "$FUNNEL_F" parse_errors)"
-log "Faithful sites=${ROW[f_sites]} exprs=${ROW[f_total_exprs]} parse_errors=${ROW[faithful_parse_errors]}"
-
-# --- per-function metrics (contract §4): line-bucketed counts + region-key join ---
-read -r _tf _usafe _ufaith _made < <(region_metrics "$FUNNEL_R" "$FUNNEL_F")
-ROW[total_fns]="${_tf:-0}"
-ROW[unsafe_fns_safe]="${_usafe:-0}"
-ROW[unsafe_fns_faithful]="${_ufaith:-0}"
-ROW[fns_made_safe]="${_made:-0}"
-log "fns: total=${ROW[total_fns]} unsafe_safe=${ROW[unsafe_fns_safe]} unsafe_faithful=${ROW[unsafe_fns_faithful]} made_safe=${ROW[fns_made_safe]}"
+# --- geiger: score the FAITHFUL (before) emission; raw JSON -> geiger-faithful.json ---
+geiger_mode_into_row "$FAITHFUL_OUT" faithful gf "${OUT}/geiger-faithful.json"
+log "geiger faithful: ok=${ROW[gf_ok]} exprs_unsafe=${ROW[gf_exprs_unsafe]}"
 
 # --- faithful build-check (best-effort; NEVER fails the project — contract §5) ---
 n_f_ok=0
